@@ -18,7 +18,7 @@ from rich.progress import (
 )
 
 from config.settings import Settings
-from pipeline.claude_agent import ClaudeAgent
+from pipeline.claude_agent import ClaudeAgent, _log
 from pipeline.git_operations import GitOperations
 from pipeline.jira_client import JiraClient
 
@@ -200,6 +200,9 @@ def run_pipeline(args: argparse.Namespace):
         )
         jira = JiraClient(settings.jira_server, settings.jira_email, settings.jira_api_token)
         ticket = jira.get_ticket(args.ticket_id)
+        _log.info("=== Pipeline started: ticket=%s dry_run=%s ===", args.ticket_id, args.dry_run)
+        _log.info("[1/5] Ticket fetched: %s | status=%s | type=%s",
+                  ticket["summary"], ticket["status"], ticket["issue_type"])
         progress.update(
             t1, advance=1,
             description=f"[green]\\[1/5][/green] {args.ticket_id}: {ticket['summary'][:55]}",
@@ -229,6 +232,7 @@ def run_pipeline(args: argparse.Namespace):
             progress.advance(t2)
         progress.update(t2, description=f"[green]\\[2/5][/green] {len(files)} file(s) loaded")
         total_chars = sum(len(c) for c in files.values())
+        _log.info("[2/5] Files loaded: %d file(s), %d total chars", len(files), total_chars)
         console.print(f"  [dim]Total size:[/dim] {total_chars:,} chars")
         for fp in list(files.keys())[:8]:
             console.print(f"  [dim]  {fp}[/dim]")
@@ -253,7 +257,9 @@ def run_pipeline(args: argparse.Namespace):
             progress.update(t3, advance=1,
                             description=f"[green]\\[3/5][/green] Branch '{branch_name}' ready")
             console.print(f"  [dim]Branch:[/dim] {git_ops.current_branch()}")
+            _log.info("[3/5] Branch created: %s", branch_name)
         else:
+            _log.info("[3/5] dry-run — skipped branch creation: %s", branch_name)
             console.print(f"  [dim](dry-run) Would create branch '{branch_name}'[/dim]")
 
         # ── 4. Claude ─────────────────────────────────────────────────────────
@@ -276,6 +282,7 @@ def run_pipeline(args: argparse.Namespace):
             modified_files, branch_name, progress,
         )
 
+    _log.info("=== Pipeline finished: pr_url=%s ===", pr_url or "(none)")
     console.print(f"\n[bold green]Done![/bold green] → {pr_url}\n")
 
 
