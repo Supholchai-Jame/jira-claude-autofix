@@ -18,6 +18,20 @@ class GitOperations:
         self.repo.git.pull("origin", default_branch)
         self.repo.git.checkout("-b", branch_name)
 
+    def current_branch(self) -> str:
+        return self.repo.active_branch.name
+
+    BRANCH_PREFIXES = ("feature/", "fixbug/")
+
+    def validate_branch_matches_ticket(self, ticket_id: str, ticket_summary: str) -> tuple[bool, str]:
+        """Check current branch matches pattern: 'feature/{ticket_id} {summary}' or 'fixbug/...'"""
+        branch = self.current_branch()
+        expected_suffix = f"{ticket_id} {ticket_summary}".lower()
+        for prefix in self.BRANCH_PREFIXES:
+            if branch.lower() == f"{prefix}{expected_suffix}":
+                return True, branch
+        return False, branch
+
     def commit_and_push(self, file_paths: list[str], commit_message: str, branch_name: str):
         for fp in file_paths:
             self.repo.git.add(fp)

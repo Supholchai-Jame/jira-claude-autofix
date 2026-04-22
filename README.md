@@ -13,7 +13,15 @@ Jira PROJ-123
      ↓
   pytest  ──fail──→  Claude retry (max 3x)
      ↓ pass
+  validate branch name
+  must match: "feature/{ticket_id} {jira_summary}"
+           or "fixbug/{ticket_id} {jira_summary}"
+  e.g. "feature/KAN2-205 3.1 Feature: Item Master / Parts Management"
+       "fixbug/KAN2-205 3.1 Bug: Login page crash"
+     ↓ match
   git commit + push
+  commit message: "{ticket_id} fix({scope}): {jira_summary}"
+  e.g. "KAN2-205 fix(dashboard): 3.1 Feature: Item Master / Parts Management"
      ↓
   GitHub Pull Request (draft if tests fail)
      ↓
@@ -51,6 +59,9 @@ python main.py PROJ-123 --files src/auth.py src/models/user.py
 # Or scan an entire directory
 python main.py PROJ-123 --dir src/
 
+# With commit scope → "KAN2-205 fix(dashboard): ..."
+python main.py KAN2-205 --dir src/ --scope dashboard
+
 # Dry run — see what Claude would change, without pushing
 python main.py PROJ-123 --dir src/ --dry-run
 
@@ -60,6 +71,8 @@ python main.py PROJ-123 --files src/foo.py --skip-tests
 # Limit Claude retry attempts
 python main.py PROJ-123 --dir src/ --max-retries 2
 ```
+
+> **Note:** Before committing, the pipeline validates that your current branch name matches the pattern `feature/{ticket_id} {jira_summary}` or `fixbug/{ticket_id} {jira_summary}` (e.g. `feature/KAN2-205 3.1 Feature: Item Master / Parts Management`). If it doesn't match, the pipeline will exit with an error.
 
 ## Project Structure
 

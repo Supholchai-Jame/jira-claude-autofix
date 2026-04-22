@@ -52,6 +52,12 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Skip running tests (useful for tasks with no test suite)",
     )
+    parser.add_argument(
+        "--scope",
+        metavar="SCOPE",
+        default=None,
+        help="Conventional commit scope, e.g. dashboard → 'KAN2-123 fix(dashboard): ...'",
+    )
     return parser.parse_args()
 
 
@@ -87,42 +93,13 @@ def write_files(modified_files: dict[str, str]):
         path.write_text(content, encoding="utf-8")
 
 
-def run_pipeline(args: argparse.Namespace):
-    settings = Settings()
-    settings.validate()
-
-    # ── 1. Jira ────────────────────────────────────────────────────────────
-    print(f"\n[1/5] Fetching Jira ticket {args.ticket_id}...")
-    jira = JiraClient(settings.jira_server, settings.jira_email, settings.jira_api_token)
-    ticket = jira.get_ticket(args.ticket_id)
-    print(f"      {ticket['summary']}")
-    print(f"      Status: {ticket['status']}  |  Type: {ticket['issue_type']}")
-
-    # ── 2. Files ───────────────────────────────────────────────────────────
-    print("\n[2/5] Loading source files...")
-    files = collect_files(args.files, args.dir)
-    if not files:
-        print("  [ERROR] No files loaded. Use --files or --dir to specify code context.")
-        sys.exit(1)
-    print(f"      {len(files)} file(s) loaded")
-
-    # ── 3. Git branch ──────────────────────────────────────────────────────
-    branch_name = f"claude/{args.ticket_id.lower()}-fix"
-    git_ops = GitOperations(
-        settings.repo_local_path,
-        settings.github_token,
-        settings.github_repo,
-    )
-    if not args.dry_run:
-        print(f"\n[3/5] Creating branch '{branch_name}'...")
-        git_ops.create_branch(branch_name)
-    else:
-        print(f"\n[3/5] (dry-run) Would create branch '{branch_name}'")
-
-    # ── 4. Claude + test loop ──────────────────────────────────────────────
-    agent = ClaudeAgent(settings.anthropic_api_key, settings.claude_model)
-    validator = Validator(settings.repo_local_path)
-
+def run_claude_loop(
+    agent: ClaudeAgent,
+    validator: Validator,
+    ticket: dict,
+    args: argparse.Namespace,
+    files: dict[str, str],
+) -> tuple[dict[str, str], bool]:
     modified_files: dict[str, str] = {}
     test_error: str | None = None
     tests_passed = True
@@ -160,20 +137,33 @@ def run_pipeline(args: argparse.Namespace):
         if iteration == args.max_retries:
             print("      Max retries reached — will create draft PR.")
 
-    # ── 5. Git commit + PR + Jira ──────────────────────────────────────────
-    if args.dry_run:
-        print("\n[5/5] (dry-run) Skipping Git push and Jira update.")
-        print("      Files that would be committed:")
-        for fp in modified_files:
-            print(f"        - {fp}")
-        return
+    return modified_files, tests_passed
 
-    if not modified_files:
-        print("\n[5/5] No files modified — nothing to commit.")
-        return
 
-    print("\n[5/5] Committing, pushing, and creating PR...")
-    commit_message = f"fix: {ticket['summary']} ({args.ticket_id})"
+def publish_results(
+    git_ops: GitOperations,
+    jira: JiraClient,
+    ticket: dict,
+    modified_files: dict[str, str],
+    tests_passed: bool,
+    branch_name: str,
+    args: argparse.Namespace,
+    settings: Settings,
+):
+    # Guard: branch name must match "{ticket_id} {jira_summary}"
+    branch_ok, actual_branch = git_ops.validate_branch_matches_ticket(
+        args.ticket_id, ticket["summary"]
+    )
+    if not branch_ok:
+        expected = f"{args.ticket_id} {ticket['summary']}"
+        print("  [ERROR] Branch name mismatch.")
+        print(f"          Current : {actual_branch}")
+        print(f"          Expected: {expected}")
+        sys.exit(1)
+    print(f"      Branch OK: {actual_branch}")
+
+    scope_part = f"({args.scope})" if args.scope else ""
+    commit_message = f"{args.ticket_id} fix{scope_part}: {ticket['summary']}"
     git_ops.commit_and_push(list(modified_files.keys()), commit_message, branch_name)
 
     pr_body = (
@@ -194,7 +184,7 @@ def run_pipeline(args: argparse.Namespace):
     )
     print(f"      PR: {pr_url}")
 
-    status_note = "tests passing" if tests_passed else "⚠️ tests failing — please review"
+    status_note = "tests passing" if tests_passed else "tests failing — please review"
     jira.add_comment(
         args.ticket_id,
         f"Claude AI Pipeline submitted a PR ({status_note}):\n{pr_url}",
@@ -207,6 +197,59 @@ def run_pipeline(args: argparse.Namespace):
             print(f"      [WARN] Could not transition ticket: {e}")
 
     print(f"\nDone! → {pr_url}\n")
+
+
+def run_pipeline(args: argparse.Namespace):
+    settings = Settings()
+    settings.validate()
+
+    # ── 1. Jira ────────────────────────────────────────────────────────────
+    print(f"\n[1/5] Fetching Jira ticket {args.ticket_id}...")
+    jira = JiraClient(settings.jira_server, settings.jira_email, settings.jira_api_token)
+    ticket = jira.get_ticket(args.ticket_id)
+    print(f"      {ticket['summary']}")
+    print(f"      Status: {ticket['status']}  |  Type: {ticket['issue_type']}")
+
+    # ── 2. Files ───────────────────────────────────────────────────────────
+    print("\n[2/5] Loading source files...")
+    files = collect_files(args.files, args.dir)
+    if not files:
+        print("  [ERROR] No files loaded. Use --files or --dir to specify code context.")
+        sys.exit(1)
+    print(f"      {len(files)} file(s) loaded")
+
+    # ── 3. Git branch ──────────────────────────────────────────────────────
+    branch_name = f"claude/{args.ticket_id.lower()}-fix"
+    git_ops = GitOperations(
+        settings.repo_local_path,
+        settings.github_token,
+        settings.github_repo,
+    )
+    if not args.dry_run:
+        print(f"\n[3/5] Creating branch '{branch_name}'...")
+        git_ops.create_branch(branch_name)
+    else:
+        print(f"\n[3/5] (dry-run) Would create branch '{branch_name}'")
+
+    # ── 4. Claude + test loop ──────────────────────────────────────────────
+    agent = ClaudeAgent(settings.anthropic_api_key, settings.claude_model)
+    validator = Validator(settings.repo_local_path)
+    modified_files, tests_passed = run_claude_loop(agent, validator, ticket, args, files)
+
+    # ── 5. Git commit + PR + Jira ──────────────────────────────────────────
+    if args.dry_run:
+        print("\n[5/5] (dry-run) Skipping Git push and Jira update.")
+        print("      Files that would be committed:")
+        for fp in modified_files:
+            print(f"        - {fp}")
+        return
+
+    if not modified_files:
+        print("\n[5/5] No files modified — nothing to commit.")
+        return
+
+    print("\n[5/5] Committing, pushing, and creating PR...")
+    publish_results(git_ops, jira, ticket, modified_files, tests_passed, branch_name, args, settings)
 
 
 if __name__ == "__main__":
