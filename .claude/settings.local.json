@@ -2,7 +2,9 @@
   "permissions": {
     "allow": [
       "Bash(git credential *)",
-      "Bash(python -m pip --version)"
+      "Bash(python -m pip --version)",
+      "Bash(python main.py KAN2-205 --dry-run)",
+      "Bash(npm install *)"
     ]
   }
 }

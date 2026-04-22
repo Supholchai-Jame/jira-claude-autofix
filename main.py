@@ -7,11 +7,38 @@ import argparse
 import sys
 from pathlib import Path
 
+from rich.console import Console
+from rich.progress import (
+    BarColumn,
+    MofNCompleteColumn,
+    Progress,
+    SpinnerColumn,
+    TextColumn,
+    TimeElapsedColumn,
+)
+
 from config.settings import Settings
 from pipeline.claude_agent import ClaudeAgent
 from pipeline.git_operations import GitOperations
 from pipeline.jira_client import JiraClient
 from pipeline.validator import Validator
+
+console = Console()
+SKIP_DIRS = {
+    ".git", "__pycache__", ".venv", "venv",
+    "node_modules", "dist", "build", "target", ".angular", ".idea",
+}
+
+
+def make_progress() -> Progress:
+    return Progress(
+        SpinnerColumn(spinner_name="line"),   # ASCII: | / - \ ใช้ได้ทุก terminal
+        TextColumn("[progress.description]{task.description}", markup=True),
+        BarColumn(bar_width=28),
+        MofNCompleteColumn(),
+        TimeElapsedColumn(),
+        console=console,
+    )
 
 
 def parse_args() -> argparse.Namespace:
@@ -20,70 +47,53 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("ticket_id", help="Jira ticket ID, e.g. PROJ-123")
     parser.add_argument(
-        "--files",
-        nargs="+",
-        metavar="FILE",
+        "--files", nargs="+", metavar="FILE",
         help="Specific files to include as context for Claude",
     )
     parser.add_argument(
-        "--dir",
-        metavar="DIR",
-        help="Directory to scan — all .py files will be included as context",
+        "--dir", metavar="DIR",
+        help="Directory to scan for source files",
     )
     parser.add_argument(
-        "--test-path",
-        metavar="PATH",
-        default=None,
-        help="Path to pass to pytest (default: project root)",
+        "--ext", nargs="+", metavar="EXT",
+        help="File extensions to scan, e.g. --ext .ts .java (overrides SCAN_EXTENSIONS)",
     )
-    parser.add_argument(
-        "--max-retries",
-        type=int,
-        default=3,
-        help="Max Claude iterations on test failure (default: 3)",
-    )
-    parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="Run without pushing to Git or updating Jira",
-    )
-    parser.add_argument(
-        "--skip-tests",
-        action="store_true",
-        help="Skip running tests (useful for tasks with no test suite)",
-    )
-    parser.add_argument(
-        "--scope",
-        metavar="SCOPE",
-        default=None,
-        help="Conventional commit scope, e.g. dashboard → 'KAN2-123 fix(dashboard): ...'",
-    )
+    parser.add_argument("--test-path", metavar="PATH", default=None)
+    parser.add_argument("--max-retries", type=int, default=3)
+    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--skip-tests", action="store_true")
+    parser.add_argument("--scope", metavar="SCOPE", default=None,
+                        help="Conventional commit scope, e.g. dashboard")
     return parser.parse_args()
 
 
-def collect_files(file_paths: list[str] | None, directory: str | None) -> dict[str, str]:
-    files: dict[str, str] = {}
+def gather_paths(
+    file_paths: list[str] | None,
+    directory: str | None,
+    extensions: list[str] | None = None,
+) -> list[Path]:
+    exts = set(extensions or [".ts", ".js", ".java", ".html", ".scss", ".css"])
+    paths: list[Path] = []
 
     if file_paths:
         for fp in file_paths:
-            path = Path(fp)
-            if not path.exists():
-                print(f"  [WARN] File not found: {fp}")
-                continue
-            files[str(path)] = path.read_text(encoding="utf-8")
+            p = Path(fp)
+            if p.exists():
+                paths.append(p)
+            else:
+                console.print(f"  [yellow]WARN[/yellow] File not found: {fp}")
 
     if directory:
-        dir_path = Path(directory)
-        if not dir_path.is_dir():
-            print(f"  [WARN] Directory not found: {directory}")
+        d = Path(directory)
+        if d.is_dir():
+            paths += [
+                p for p in sorted(d.rglob("*"))
+                if p.is_file() and p.suffix in exts and not SKIP_DIRS.intersection(p.parts)
+            ]
         else:
-            for py_file in sorted(dir_path.rglob("*.py")):
-                skip_parts = {".git", "__pycache__", ".venv", "venv", "node_modules"}
-                if skip_parts.intersection(py_file.parts):
-                    continue
-                files[str(py_file)] = py_file.read_text(encoding="utf-8")
+            console.print(f"  [yellow]WARN[/yellow] Directory not found: {directory}")
 
-    return files
+    return paths
 
 
 def write_files(modified_files: dict[str, str]):
@@ -93,19 +103,29 @@ def write_files(modified_files: dict[str, str]):
         path.write_text(content, encoding="utf-8")
 
 
-def run_claude_loop(
+def _step4_claude_loop(
     agent: ClaudeAgent,
     validator: Validator,
     ticket: dict,
     args: argparse.Namespace,
     files: dict[str, str],
+    progress: Progress,
 ) -> tuple[dict[str, str], bool]:
+    max_retries = args.max_retries
     modified_files: dict[str, str] = {}
     test_error: str | None = None
     tests_passed = True
 
-    for iteration in range(1, args.max_retries + 1):
-        print(f"\n[4/5] Claude coding — attempt {iteration}/{args.max_retries}...")
+    t4 = progress.add_task(
+        f"[cyan]\\[4/5][/cyan] Claude thinking (attempt 1/{max_retries})...",
+        total=max_retries,
+    )
+
+    for iteration in range(1, max_retries + 1):
+        progress.update(
+            t4,
+            description=f"[cyan]\\[4/5][/cyan] Claude thinking (attempt {iteration}/{max_retries})...",
+        )
         modified_files = agent.fix_code(
             task_description=ticket["description"],
             files=files,
@@ -114,57 +134,71 @@ def run_claude_loop(
         )
 
         if not modified_files:
-            print("      Claude reports: no changes needed.")
+            progress.update(t4, completed=max_retries,
+                            description="[green]\\[4/5][/green] Claude: no changes needed")
             break
-
-        print(f"      {len(modified_files)} file(s) modified:")
-        for fp in modified_files:
-            print(f"        - {fp}")
 
         write_files(modified_files)
 
         if args.skip_tests:
-            print("      (tests skipped)")
+            progress.update(
+                t4, completed=max_retries,
+                description=f"[green]\\[4/5][/green] {len(modified_files)} file(s) modified (tests skipped)",
+            )
             break
 
+        progress.update(
+            t4,
+            description=f"[cyan]\\[4/5][/cyan] Running tests (attempt {iteration}/{max_retries})...",
+        )
         tests_passed, test_output = validator.run_tests(args.test_path)
+        progress.advance(t4)
+
         if tests_passed:
-            print("      All tests passed.")
+            progress.update(
+                t4,
+                description=f"[green]\\[4/5][/green] {len(modified_files)} file(s) modified, tests passed",
+            )
             break
 
-        print(f"      Tests failed (attempt {iteration}).")
         test_error = test_output
-        if iteration == args.max_retries:
-            print("      Max retries reached — will create draft PR.")
+        if iteration == max_retries:
+            progress.update(t4, description="[yellow]\\[4/5][/yellow] Max retries — will create draft PR")
 
     return modified_files, tests_passed
 
 
-def publish_results(
+def _step5_publish(
     git_ops: GitOperations,
     jira: JiraClient,
     ticket: dict,
+    args: argparse.Namespace,
+    settings: Settings,
     modified_files: dict[str, str],
     tests_passed: bool,
     branch_name: str,
-    args: argparse.Namespace,
-    settings: Settings,
-):
-    # Guard: branch name must match "{ticket_id} {jira_summary}"
+    progress: Progress,
+) -> str:
+    t5 = progress.add_task("[cyan]\\[5/5][/cyan] Committing & pushing...", total=4)
+
     branch_ok, actual_branch = git_ops.validate_branch_matches_ticket(
         args.ticket_id, ticket["summary"]
     )
     if not branch_ok:
+        progress.stop()
         expected = f"{args.ticket_id} {ticket['summary']}"
-        print("  [ERROR] Branch name mismatch.")
-        print(f"          Current : {actual_branch}")
-        print(f"          Expected: {expected}")
+        console.print(
+            f"[red]  ERROR:[/red] Branch mismatch.\n"
+            f"  Current : {actual_branch}\n"
+            f"  Expected: {expected}"
+        )
         sys.exit(1)
-    print(f"      Branch OK: {actual_branch}")
+    progress.advance(t5)
 
     scope_part = f"({args.scope})" if args.scope else ""
     commit_message = f"{args.ticket_id} fix{scope_part}: {ticket['summary']}"
     git_ops.commit_and_push(list(modified_files.keys()), commit_message, branch_name)
+    progress.update(t5, advance=1, description="[cyan]\\[5/5][/cyan] Creating pull request...")
 
     pr_body = (
         f"## Summary\n\n"
@@ -182,74 +216,97 @@ def publish_results(
         body=pr_body,
         draft=not tests_passed,
     )
-    print(f"      PR: {pr_url}")
+    progress.update(t5, advance=1, description="[cyan]\\[5/5][/cyan] Updating Jira...")
 
     status_note = "tests passing" if tests_passed else "tests failing — please review"
-    jira.add_comment(
-        args.ticket_id,
-        f"Claude AI Pipeline submitted a PR ({status_note}):\n{pr_url}",
-    )
+    jira.add_comment(args.ticket_id, f"Claude AI Pipeline submitted a PR ({status_note}):\n{pr_url}")
     if tests_passed:
         try:
             jira.transition_issue(args.ticket_id, settings.jira_review_transition)
-            print(f"      Jira ticket moved to '{settings.jira_review_transition}'")
         except ValueError as e:
-            print(f"      [WARN] Could not transition ticket: {e}")
+            console.print(f"  [yellow]WARN:[/yellow] Could not transition ticket: {e}")
 
-    print(f"\nDone! → {pr_url}\n")
+    progress.update(t5, advance=1, description="[green]\\[5/5][/green] Done — PR created")
+    return pr_url
 
 
 def run_pipeline(args: argparse.Namespace):
     settings = Settings()
     settings.validate()
 
-    # ── 1. Jira ────────────────────────────────────────────────────────────
-    print(f"\n[1/5] Fetching Jira ticket {args.ticket_id}...")
-    jira = JiraClient(settings.jira_server, settings.jira_email, settings.jira_api_token)
-    ticket = jira.get_ticket(args.ticket_id)
-    print(f"      {ticket['summary']}")
-    print(f"      Status: {ticket['status']}  |  Type: {ticket['issue_type']}")
+    pr_url: str = ""
 
-    # ── 2. Files ───────────────────────────────────────────────────────────
-    print("\n[2/5] Loading source files...")
-    files = collect_files(args.files, args.dir)
-    if not files:
-        print("  [ERROR] No files loaded. Use --files or --dir to specify code context.")
-        sys.exit(1)
-    print(f"      {len(files)} file(s) loaded")
+    with make_progress() as progress:
 
-    # ── 3. Git branch ──────────────────────────────────────────────────────
-    branch_name = f"claude/{args.ticket_id.lower()}-fix"
-    git_ops = GitOperations(
-        settings.repo_local_path,
-        settings.github_token,
-        settings.github_repo,
-    )
-    if not args.dry_run:
-        print(f"\n[3/5] Creating branch '{branch_name}'...")
-        git_ops.create_branch(branch_name)
-    else:
-        print(f"\n[3/5] (dry-run) Would create branch '{branch_name}'")
+        # ── 1. Jira ───────────────────────────────────────────────────────────
+        t1 = progress.add_task(
+            f"[cyan]\\[1/5][/cyan] Fetching {args.ticket_id}...", total=1
+        )
+        jira = JiraClient(settings.jira_server, settings.jira_email, settings.jira_api_token)
+        ticket = jira.get_ticket(args.ticket_id)
+        progress.update(
+            t1, advance=1,
+            description=f"[green]\\[1/5][/green] {args.ticket_id}: {ticket['summary'][:55]}",
+        )
 
-    # ── 4. Claude + test loop ──────────────────────────────────────────────
-    agent = ClaudeAgent(settings.anthropic_api_key, settings.claude_model)
-    validator = Validator(settings.repo_local_path)
-    modified_files, tests_passed = run_claude_loop(agent, validator, ticket, args, files)
+        # ── 2. Files ──────────────────────────────────────────────────────────
+        t2 = progress.add_task("[cyan]\\[2/5][/cyan] Scanning source files...", total=None)
+        effective_dir = args.dir or settings.default_dir or settings.repo_local_path or None
+        extensions = args.ext or settings.extension_list
+        paths = gather_paths(args.files, effective_dir, extensions)
+        if not paths:
+            progress.stop()
+            console.print("[red]  ERROR:[/red] No files loaded. Use --files or --dir.")
+            sys.exit(1)
 
-    # ── 5. Git commit + PR + Jira ──────────────────────────────────────────
-    if args.dry_run:
-        print("\n[5/5] (dry-run) Skipping Git push and Jira update.")
-        print("      Files that would be committed:")
-        for fp in modified_files:
-            print(f"        - {fp}")
-        return
+        progress.update(t2, total=len(paths))
+        files: dict[str, str] = {}
+        for p in paths:
+            try:
+                files[str(p)] = p.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                pass
+            progress.advance(t2)
+        progress.update(t2, description=f"[green]\\[2/5][/green] {len(files)} file(s) loaded")
 
-    if not modified_files:
-        print("\n[5/5] No files modified — nothing to commit.")
-        return
+        # ── 3. Git branch ─────────────────────────────────────────────────────
+        branch_name = f"claude/{args.ticket_id.lower()}-fix"
+        git_ops = GitOperations(settings.repo_local_path, settings.github_token, settings.github_repo)
 
-    print("\n[5/5] Committing, pushing, and creating PR...")
-    publish_results(git_ops, jira, ticket, modified_files, tests_passed, branch_name, args, settings)
+        if not args.dry_run:
+            t3 = progress.add_task(
+                f"[cyan]\\[3/5][/cyan] Creating branch '{branch_name}'...", total=1
+            )
+            git_ops.create_branch(branch_name)
+            progress.update(t3, advance=1,
+                            description=f"[green]\\[3/5][/green] Branch '{branch_name}' ready")
+        else:
+            console.print(f"  [dim](dry-run) Would create branch '{branch_name}'[/dim]")
+
+        # ── 4. Claude + test loop ─────────────────────────────────────────────
+        agent = ClaudeAgent(model=settings.claude_model)
+        validator = Validator(settings.repo_local_path)
+        modified_files, tests_passed = _step4_claude_loop(
+            agent, validator, ticket, args, files, progress
+        )
+
+        # ── 5. Publish ────────────────────────────────────────────────────────
+        if args.dry_run:
+            console.print("\n  [dim](dry-run) Skipping Git push and Jira update.[/dim]")
+            for fp in modified_files:
+                console.print(f"    [dim]- {fp}[/dim]")
+            return
+
+        if not modified_files:
+            console.print("\n  No files modified — nothing to commit.")
+            return
+
+        pr_url = _step5_publish(
+            git_ops, jira, ticket, args, settings,
+            modified_files, tests_passed, branch_name, progress,
+        )
+
+    console.print(f"\n[bold green]Done![/bold green] → {pr_url}\n")
 
 
 if __name__ == "__main__":

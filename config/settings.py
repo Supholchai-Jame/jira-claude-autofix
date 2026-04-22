@@ -19,10 +19,19 @@ class Settings:
     github_repo: str = field(default_factory=lambda: os.getenv("GITHUB_REPO", ""))
 
     repo_local_path: str = field(default_factory=lambda: os.getenv("REPO_LOCAL_PATH", "."))
+    default_dir: str = field(default_factory=lambda: os.getenv("DEFAULT_DIR", ""))
+    scan_extensions: str = field(
+        default_factory=lambda: os.getenv(
+            "SCAN_EXTENSIONS", ".ts,.js,.java,.html,.scss,.css"
+        )
+    )
+
+    @property
+    def extension_list(self) -> list[str]:
+        return [e.strip() for e in self.scan_extensions.split(",") if e.strip()]
 
     def validate(self):
         required = {
-            "ANTHROPIC_API_KEY": self.anthropic_api_key,
             "JIRA_SERVER": self.jira_server,
             "JIRA_EMAIL": self.jira_email,
             "JIRA_API_TOKEN": self.jira_api_token,
