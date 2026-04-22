@@ -14,25 +14,14 @@ class ClaudeAgent:
         self,
         task_description: str,
         files: dict[str, str],
-        test_error: str = None,
-        iteration: int = 1,
     ) -> dict[str, str]:
-        if iteration == 1:
-            self._history = []
-            self._files_context = self._format_files(files)
-            user_msg = (
-                f"{self._files_context}\n\n"
-                f"## Jira Task\n\n{task_description}\n\n"
-                "Implement or fix the code as described above."
-            )
-        else:
-            user_msg = (
-                f"## Test Failures (Attempt {iteration})\n\n"
-                f"```\n{test_error}\n```\n\n"
-                "The tests above are failing. Fix the code so all tests pass. "
-                "Return only the files that need to change."
-            )
-
+        self._history = []
+        self._files_context = self._format_files(files)
+        user_msg = (
+            f"{self._files_context}\n\n"
+            f"## Jira Task\n\n{task_description}\n\n"
+            "Implement or fix the code as described above."
+        )
         prompt = self._build_prompt(user_msg)
         response_text = self._call_claude(prompt)
         self._history.append(f"User: {user_msg}\n\nAssistant: {response_text}")
@@ -69,7 +58,7 @@ class ClaudeAgent:
             return {}
         pattern = r'<modified_file path="([^"]+)">\n(.*?)\n</modified_file>'
         matches = re.findall(pattern, text, re.DOTALL)
-        return {path: content for path, content in matches}
+        return dict(matches)
 
     def _load_system_prompt(self) -> str:
         prompt_path = Path(__file__).parent.parent / "prompts" / "coding_agent.txt"
