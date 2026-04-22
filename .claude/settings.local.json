@@ -6,7 +6,8 @@
       "Bash(python main.py KAN2-205 --dry-run)",
       "Bash(npm install *)",
       "Bash(where claude *)",
-      "PowerShell(Get-Command claude -ErrorAction SilentlyContinue; npm list -g @anthropic-ai/claude-code 2>$null; ls \"$env:APPDATA\\\\npm\" 2>$null | Select-String claude)"
+      "PowerShell(Get-Command claude -ErrorAction SilentlyContinue; npm list -g @anthropic-ai/claude-code 2>$null; ls \"$env:APPDATA\\\\npm\" 2>$null | Select-String claude)",
+      "PowerShell(npm config get proxy; npm config get https-proxy; [System.Environment]::GetEnvironmentVariable\\(\"HTTP_PROXY\", \"User\"\\); [System.Environment]::GetEnvironmentVariable\\(\"HTTPS_PROXY\", \"User\"\\); [System.Environment]::GetEnvironmentVariable\\(\"HTTP_PROXY\", \"Machine\"\\); netsh winhttp show proxy)"
     ]
   }
 }
