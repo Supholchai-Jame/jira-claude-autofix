@@ -4,7 +4,9 @@
       "Bash(git credential *)",
       "Bash(python -m pip --version)",
       "Bash(python main.py KAN2-205 --dry-run)",
-      "Bash(npm install *)"
+      "Bash(npm install *)",
+      "Bash(where claude *)",
+      "PowerShell(Get-Command claude -ErrorAction SilentlyContinue; npm list -g @anthropic-ai/claude-code 2>$null; ls \"$env:APPDATA\\\\npm\" 2>$null | Select-String claude)"
     ]
   }
 }
