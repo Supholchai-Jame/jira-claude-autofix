@@ -15,8 +15,10 @@ class Settings:
     jira_api_token: str = field(default_factory=lambda: os.getenv("JIRA_API_TOKEN", ""))
     jira_review_transition: str = field(default_factory=lambda: os.getenv("JIRA_REVIEW_TRANSITION", "In Review"))
 
-    github_token: str = field(default_factory=lambda: os.getenv("GITHUB_TOKEN", ""))
-    github_repo: str = field(default_factory=lambda: os.getenv("GITHUB_REPO", ""))
+    gitlab_token: str = field(default_factory=lambda: os.getenv("GITLAB_TOKEN", ""))
+    gitlab_repo: str = field(default_factory=lambda: os.getenv("GITLAB_REPO", ""))
+    gitlab_server: str = field(default_factory=lambda: os.getenv("GITLAB_SERVER", "https://gitlab.com"))
+    gitlab_ssl_verify: bool = field(default_factory=lambda: os.getenv("GITLAB_SSL_VERIFY", "true").lower() != "false")
 
     repo_local_path: str = field(default_factory=lambda: os.getenv("REPO_LOCAL_PATH", "."))
     default_dir: str = field(default_factory=lambda: os.getenv("DEFAULT_DIR", ""))
@@ -41,5 +43,5 @@ class Settings:
             raise ValueError(f"Missing required environment variables: {', '.join(missing)}")
 
     @property
-    def github_enabled(self) -> bool:
-        return bool(self.github_token and self.github_repo)
+    def gitlab_enabled(self) -> bool:
+        return bool(self.gitlab_token and self.gitlab_repo)

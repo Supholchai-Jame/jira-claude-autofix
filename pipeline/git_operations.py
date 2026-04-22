@@ -1,18 +1,19 @@
 from pathlib import Path
 
 import git
-from github import Github
+import requests
 
 
 class GitOperations:
-    def __init__(self, repo_path: str, github_token: str = "", github_repo: str = ""):
+    def __init__(self, repo_path: str, gitlab_token: str = "", gitlab_repo: str = "", gitlab_server: str = "https://gitlab.com", ssl_verify: bool = True):
         self.repo_path = Path(repo_path)
         self.repo = git.Repo(repo_path)
-        self._github_token = github_token
-        self._github_repo = github_repo
+        self._gitlab_token = gitlab_token
+        self._gitlab_repo = gitlab_repo
+        self._gitlab_server = gitlab_server.rstrip("/")
+        self._ssl_verify = ssl_verify
 
     def create_branch(self, branch_name: str):
-        # Start from the latest main/master
         default_branch = self._get_default_branch()
         self.repo.git.checkout(default_branch)
         self.repo.git.pull("origin", default_branch)
@@ -23,12 +24,11 @@ class GitOperations:
 
     BRANCH_PREFIXES = ("feature/", "fixbug/")
 
-    def validate_branch_matches_ticket(self, ticket_id: str, ticket_summary: str) -> tuple[bool, str]:
-        """Check current branch matches pattern: 'feature/{ticket_id} {summary}' or 'fixbug/...'"""
+    def validate_branch_matches_ticket(self, ticket_id: str) -> tuple[bool, str]:
         branch = self.current_branch()
-        expected_suffix = f"{ticket_id} {ticket_summary}".lower()
+        ticket_slug = f"{ticket_id.lower()}-fix"
         for prefix in self.BRANCH_PREFIXES:
-            if branch.lower() == f"{prefix}{expected_suffix}":
+            if branch.lower() == f"{prefix}{ticket_slug}":
                 return True, branch
         return False, branch
 
@@ -47,21 +47,24 @@ class GitOperations:
         body: str,
         draft: bool = False,
     ) -> str:
-        if not self._github_token or not self._github_repo:
-            return f"(GitHub not configured — branch '{branch}' pushed but no PR created)"
+        if not self._gitlab_token or not self._gitlab_repo:
+            return f"(GitLab not configured — branch '{branch}' pushed but no MR created)"
 
-        gh = Github(self._github_token)
-        repo = gh.get_repo(self._github_repo)
+        encoded_repo = self._gitlab_repo.replace("/", "%2F")
+        url = f"{self._gitlab_server}/api/v4/projects/{encoded_repo}/merge_requests"
         default_branch = self._get_default_branch()
 
-        pr = repo.create_pull(
-            title=title,
-            body=body,
-            head=branch,
-            base=default_branch,
-            draft=draft,
-        )
-        return pr.html_url
+        payload = {
+            "source_branch": branch,
+            "target_branch": default_branch,
+            "title": title,
+            "description": body,
+            "draft": draft,
+        }
+        headers = {"PRIVATE-TOKEN": self._gitlab_token}
+        resp = requests.post(url, json=payload, headers=headers, verify=self._ssl_verify)
+        resp.raise_for_status()
+        return resp.json().get("web_url", "(MR created but URL not returned)")
 
     def _get_default_branch(self) -> str:
         try:

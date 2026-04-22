@@ -64,6 +64,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--skip-tests", action="store_true")
     parser.add_argument("--scope", metavar="SCOPE", default=None,
                         help="Conventional commit scope, e.g. dashboard")
+    parser.add_argument("--prefix", metavar="PREFIX", default="feature",
+                        choices=["feature", "fixbug"],
+                        help="Branch prefix: feature or fixbug (default: feature)")
     return parser.parse_args()
 
 
@@ -103,6 +106,72 @@ def write_files(modified_files: dict[str, str]):
         path.write_text(content, encoding="utf-8")
 
 
+def _try_one_iteration(
+    agent: ClaudeAgent,
+    validator: Validator,
+    ticket: dict,
+    args: argparse.Namespace,
+    files: dict[str, str],
+    test_error: str | None,
+    iteration: int,
+    max_retries: int,
+    t4: object,
+    progress: Progress,
+) -> tuple[dict[str, str], bool, bool, str | None]:
+    """Run one Claude attempt. Returns (modified_files, done, tests_passed, test_error)."""
+    progress.update(
+        t4,
+        description=f"[cyan]\\[4/5][/cyan] Claude thinking (attempt {iteration}/{max_retries})...",
+    )
+    modified_files = agent.fix_code(
+        task_description=ticket["description"],
+        files=files,
+        test_error=test_error,
+        iteration=iteration,
+    )
+
+    if not modified_files:
+        progress.update(t4, completed=max_retries,
+                        description="[green]\\[4/5][/green] Claude: no changes needed")
+        return modified_files, True, True, None
+
+    write_files(modified_files)
+    console.print(f"  [dim]Modified {len(modified_files)} file(s):[/dim]")
+    for fp in modified_files:
+        console.print(f"  [dim]  {fp}[/dim]")
+
+    if args.skip_tests:
+        progress.update(
+            t4, completed=max_retries,
+            description=f"[green]\\[4/5][/green] {len(modified_files)} file(s) modified (tests skipped)",
+        )
+        return modified_files, True, True, None
+
+    progress.update(
+        t4,
+        description=f"[cyan]\\[4/5][/cyan] Running tests (attempt {iteration}/{max_retries})...",
+    )
+    tests_passed, test_output = validator.run_tests(args.test_path)
+    progress.advance(t4)
+
+    if tests_passed:
+        progress.update(
+            t4,
+            description=f"[green]\\[4/5][/green] {len(modified_files)} file(s) modified, tests passed",
+        )
+        console.print("  [green]Tests: PASSED[/green]")
+        return modified_files, True, True, None
+
+    console.print("  [red]Tests: FAILED[/red]")
+    console.print(f"  [dim]{'  '.join(test_output.splitlines()[:6])}[/dim]")
+
+    if iteration == max_retries:
+        progress.update(t4, description="[yellow]\\[4/5][/yellow] Max retries — will create draft PR")
+        return modified_files, True, False, test_output
+
+    return modified_files, False, False, test_output
+
+
 def _step4_claude_loop(
     agent: ClaudeAgent,
     validator: Validator,
@@ -122,48 +191,12 @@ def _step4_claude_loop(
     )
 
     for iteration in range(1, max_retries + 1):
-        progress.update(
-            t4,
-            description=f"[cyan]\\[4/5][/cyan] Claude thinking (attempt {iteration}/{max_retries})...",
+        modified_files, done, tests_passed, test_error = _try_one_iteration(
+            agent, validator, ticket, args, files,
+            test_error, iteration, max_retries, t4, progress,
         )
-        modified_files = agent.fix_code(
-            task_description=ticket["description"],
-            files=files,
-            test_error=test_error,
-            iteration=iteration,
-        )
-
-        if not modified_files:
-            progress.update(t4, completed=max_retries,
-                            description="[green]\\[4/5][/green] Claude: no changes needed")
+        if done:
             break
-
-        write_files(modified_files)
-
-        if args.skip_tests:
-            progress.update(
-                t4, completed=max_retries,
-                description=f"[green]\\[4/5][/green] {len(modified_files)} file(s) modified (tests skipped)",
-            )
-            break
-
-        progress.update(
-            t4,
-            description=f"[cyan]\\[4/5][/cyan] Running tests (attempt {iteration}/{max_retries})...",
-        )
-        tests_passed, test_output = validator.run_tests(args.test_path)
-        progress.advance(t4)
-
-        if tests_passed:
-            progress.update(
-                t4,
-                description=f"[green]\\[4/5][/green] {len(modified_files)} file(s) modified, tests passed",
-            )
-            break
-
-        test_error = test_output
-        if iteration == max_retries:
-            progress.update(t4, description="[yellow]\\[4/5][/yellow] Max retries — will create draft PR")
 
     return modified_files, tests_passed
 
@@ -181,9 +214,7 @@ def _step5_publish(
 ) -> str:
     t5 = progress.add_task("[cyan]\\[5/5][/cyan] Committing & pushing...", total=4)
 
-    branch_ok, actual_branch = git_ops.validate_branch_matches_ticket(
-        args.ticket_id, ticket["summary"]
-    )
+    branch_ok, actual_branch = git_ops.validate_branch_matches_ticket(args.ticket_id)
     if not branch_ok:
         progress.stop()
         expected = f"{args.ticket_id} {ticket['summary']}"
@@ -197,6 +228,7 @@ def _step5_publish(
 
     scope_part = f"({args.scope})" if args.scope else ""
     commit_message = f"{args.ticket_id} fix{scope_part}: {ticket['summary']}"
+    console.print(f"  [dim]Commit:[/dim] {commit_message}")
     git_ops.commit_and_push(list(modified_files.keys()), commit_message, branch_name)
     progress.update(t5, advance=1, description="[cyan]\\[5/5][/cyan] Creating pull request...")
 
@@ -216,6 +248,7 @@ def _step5_publish(
         body=pr_body,
         draft=not tests_passed,
     )
+    console.print(f"  [dim]PR:[/dim] {pr_url}")
     progress.update(t5, advance=1, description="[cyan]\\[5/5][/cyan] Updating Jira...")
 
     status_note = "tests passing" if tests_passed else "tests failing — please review"
@@ -223,6 +256,7 @@ def _step5_publish(
     if tests_passed:
         try:
             jira.transition_issue(args.ticket_id, settings.jira_review_transition)
+            console.print(f"  [dim]Jira:[/dim] Transitioned to '{settings.jira_review_transition}'")
         except ValueError as e:
             console.print(f"  [yellow]WARN:[/yellow] Could not transition ticket: {e}")
 
@@ -248,6 +282,10 @@ def run_pipeline(args: argparse.Namespace):
             t1, advance=1,
             description=f"[green]\\[1/5][/green] {args.ticket_id}: {ticket['summary'][:55]}",
         )
+        console.print(f"  [dim]Status:[/dim] {ticket['status']}  [dim]Type:[/dim] {ticket['issue_type']}")
+        if ticket["description"]:
+            preview = ticket["description"][:150].replace("\n", " ")
+            console.print(f"  [dim]{preview}{'...' if len(ticket['description']) > 150 else ''}[/dim]")
 
         # ── 2. Files ──────────────────────────────────────────────────────────
         t2 = progress.add_task("[cyan]\\[2/5][/cyan] Scanning source files...", total=None)
@@ -268,10 +306,23 @@ def run_pipeline(args: argparse.Namespace):
                 pass
             progress.advance(t2)
         progress.update(t2, description=f"[green]\\[2/5][/green] {len(files)} file(s) loaded")
+        total_chars = sum(len(c) for c in files.values())
+        console.print(f"  [dim]Total size:[/dim] {total_chars:,} chars")
+        shown = list(files.keys())[:8]
+        for fp in shown:
+            console.print(f"  [dim]  {fp}[/dim]")
+        if len(files) > 8:
+            console.print(f"  [dim]  ... and {len(files) - 8} more[/dim]")
 
         # ── 3. Git branch ─────────────────────────────────────────────────────
-        branch_name = f"claude/{args.ticket_id.lower()}-fix"
-        git_ops = GitOperations(settings.repo_local_path, settings.github_token, settings.github_repo)
+        branch_name = f"{args.prefix}/{args.ticket_id.lower()}-fix"
+        git_ops = GitOperations(
+            settings.repo_local_path,
+            settings.gitlab_token,
+            settings.gitlab_repo,
+            settings.gitlab_server,
+            settings.gitlab_ssl_verify,
+        )
 
         if not args.dry_run:
             t3 = progress.add_task(
@@ -280,6 +331,7 @@ def run_pipeline(args: argparse.Namespace):
             git_ops.create_branch(branch_name)
             progress.update(t3, advance=1,
                             description=f"[green]\\[3/5][/green] Branch '{branch_name}' ready")
+            console.print(f"  [dim]Branch:[/dim] {git_ops.current_branch()}")
         else:
             console.print(f"  [dim](dry-run) Would create branch '{branch_name}'[/dim]")
 
