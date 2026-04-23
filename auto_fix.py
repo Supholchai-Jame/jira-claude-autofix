@@ -176,9 +176,10 @@ def run_workflow():
         print(f'   💾 {commit_msg}')
 
         # ── Step 6: Comment Jira ──────────────────────────────────────────────
+        claude_output = result.stdout.strip() if result.stdout.strip() else 'แก้ไขโค้ดเรียบร้อยแล้ว'
         with Spinner(6, 'ส่ง Comment กลับ Jira...'):
             comment_url  = f'https://{JIRA_DOMAIN}/rest/api/2/issue/{ticket_id}/comment'
-            comment_body = f'✅ Claude Code fixed and pushed to branch `{branch_name}`.'
+            comment_body = claude_output
             comment_data = json.dumps({'body': comment_body}).encode('utf-8')
 
             comment_req = urllib.request.Request(comment_url, data=comment_data, method='POST')
