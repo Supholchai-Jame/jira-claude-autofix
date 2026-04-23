@@ -1,111 +1,154 @@
-# Claude AI Pipeline
+# Claude AI Auto-Fix Pipeline
 
-Full loop automation for software development:
-**Jira ticket → Claude coding → pytest → Git PR → Jira update**
+ระบบอัตโนมัติที่ใช้ Claude Code แก้ไขโค้ดจาก Jira Ticket แล้ว Commit + Push ขึ้น Git พร้อม Comment กลับ Jira โดยอัตโนมัติ
+
+---
+
+## ภาพรวม Workflow
 
 ```
-Jira PROJ-123
-     ↓
-  Claude (claude-sonnet-4-6)
-  reads code + task description
-     ↓
-  writes modified files
-     ↓
-  pytest  ──fail──→  Claude retry (max 3x)
-     ↓ pass
-  validate branch name
-  must match: "feature/{ticket_id} {jira_summary}"
-           or "fixbug/{ticket_id} {jira_summary}"
-  e.g. "feature/KAN2-205 3.1 Feature: Item Master / Parts Management"
-       "fixbug/KAN2-205 3.1 Bug: Login page crash"
-     ↓ match
-  git commit + push
-  commit message: "{ticket_id} fix({scope}): {jira_summary}"
-  e.g. "KAN2-205 fix(dashboard): 3.1 Feature: Item Master / Parts Management"
-     ↓
-  GitHub Pull Request (draft if tests fail)
-     ↓
-  Jira comment + transition "In Review"
+Jira Ticket  →  สร้าง Branch  →  Claude แก้โค้ด  →  Commit & Push  →  Comment Jira
 ```
 
-## Setup
+| ขั้นตอน | รายละเอียด |
+|---------|-----------|
+| 1 | ดึงข้อมูล Jira Ticket (Summary + Description) |
+| 2 | สร้าง/Checkout Git Branch ชื่อ `{type}/{TICKET-ID}-{summary-slug}` |
+| 3–4 | Claude Code วิเคราะห์และแก้ไขโค้ดใน Repo ตาม Description |
+| 5 | `git add .` → `git commit` → `git push origin {branch}` |
+| 6 | POST comment กลับ Jira ว่าแก้เสร็จแล้วที่ Branch ไหน |
+
+---
+
+## สิ่งที่ต้องมีก่อนใช้งาน
+
+- Python 3.9+
+- [Claude Code CLI](https://claude.ai/code) ติดตั้งแล้วและ Login แล้ว (`claude --version`)
+- Git ติดตั้งแล้วและ Config `user.name` / `user.email` แล้ว
+- มีสิทธิ์ Push ไปยัง GitLab/GitHub Repo ที่ระบุ
+
+---
+
+## การติดตั้ง
 
 ```bash
-pip install -r requirements.txt
-cp .env.example .env
-# edit .env with your credentials
+# Clone โปรเจคนี้
+git clone <repo-url>
+cd Claude-AI-pipeline
+
+# ไม่ต้องติดตั้ง Dependencies เพิ่มเติม (ใช้แค่ stdlib)
 ```
 
-## Environment Variables
+---
 
-| Variable | Required | Description |
-|---|---|---|
-| `ANTHROPIC_API_KEY` | ✅ | Anthropic API key |
-| `CLAUDE_MODEL` | | Model ID (default: `claude-sonnet-4-6`) |
-| `JIRA_SERVER` | ✅ | e.g. `https://yourcompany.atlassian.net` |
-| `JIRA_EMAIL` | ✅ | Your Atlassian email |
-| `JIRA_API_TOKEN` | ✅ | Jira API token |
-| `JIRA_REVIEW_TRANSITION` | | Transition name (default: `In Review`) |
-| `GITHUB_TOKEN` | | GitHub PAT for PR creation |
-| `GITHUB_REPO` | | e.g. `org/repo-name` |
-| `REPO_LOCAL_PATH` | | Absolute path to the repo being modified |
+## การตั้งค่า `.env`
 
-## Usage
+สร้างไฟล์ `.env` ใน root ของโปรเจค (ดู `.env.example` เป็นแม่แบบ):
+
+```env
+# Anthropic
+ANTHROPIC_API_KEY=sk-ant-api03-xxxx
+CLAUDE_MODEL=claude-sonnet-4-6
+
+# Jira
+JIRA_SERVER=https://your-company.atlassian.net
+JIRA_EMAIL=your-email@company.com
+JIRA_API_TOKEN=your-jira-api-token
+JIRA_REVIEW_TRANSITION=In Review
+
+# GitLab (หรือ GitHub — ใช้สำหรับ push)
+GITLAB_SERVER=https://your-gitlab-server
+GITLAB_TOKEN=glpat-xxxx
+GITLAB_REPO=group/project
+GITLAB_SSL_VERIFY=true
+
+# Path ของ Repo ที่จะให้ Claude แก้โค้ด (absolute path)
+REPO_LOCAL_PATH=C:\Users\you\Documents\Git\your-repo
+
+# นามสกุลไฟล์ที่ต้องการให้ Claude สแกน (คั่นด้วย comma)
+SCAN_EXTENSIONS=.ts,.java,.html,.scss,.css,.js
+```
+
+### วิธีสร้าง Jira API Token
+1. ไปที่ [https://id.atlassian.com/manage-profile/security/api-tokens](https://id.atlassian.com/manage-profile/security/api-tokens)
+2. คลิก **Create API token**
+3. Copy token มาใส่ `JIRA_API_TOKEN`
+
+---
+
+## วิธีใช้งาน
 
 ```bash
-# Fix code for a specific ticket, passing individual files
-python main.py PROJ-123 --files src/auth.py src/models/user.py
+# รูปแบบพื้นฐาน
+python auto_fix.py <TICKET-ID>
 
-# Or scan an entire directory
-python main.py PROJ-123 --dir src/
-
-# With commit scope → "KAN2-205 fix(dashboard): ..."
-python main.py KAN2-205 --dir src/ --scope dashboard
-
-# Dry run — see what Claude would change, without pushing
-python main.py PROJ-123 --dir src/ --dry-run
-
-# Skip tests (if project has no test suite yet)
-python main.py PROJ-123 --files src/foo.py --skip-tests
-
-# Limit Claude retry attempts
-python main.py PROJ-123 --dir src/ --max-retries 2
+# ระบุประเภทของ Commit (default: feature)
+python auto_fix.py <TICKET-ID> <commit-type>
 ```
 
-> **Note:** Before committing, the pipeline validates that your current branch name matches the pattern `feature/{ticket_id} {jira_summary}` or `fixbug/{ticket_id} {jira_summary}` (e.g. `feature/KAN2-205 3.1 Feature: Item Master / Parts Management`). If it doesn't match, the pipeline will exit with an error.
+### ตัวอย่าง
 
-## Project Structure
+```bash
+# แก้ Bug จาก Ticket TMA-1234
+python auto_fix.py TMA-1234 fix
+
+# เพิ่ม Feature จาก Ticket TMA-5678
+python auto_fix.py TMA-5678 feature
+
+# งาน Refactor
+python auto_fix.py TMA-9999 refactor
+```
+
+### ผลลัพธ์ที่ได้
+
+- Branch ใหม่ชื่อ เช่น `fix/TMA-1234-fix-login-bug`
+- Commit message: `TMA-1234 fix(Fix Login Bug): fix login validation error`
+- Comment ใน Jira: `✅ Claude Code fixed and pushed to branch 'fix/TMA-1234-fix-login-bug'.`
+
+---
+
+## โครงสร้างไฟล์
 
 ```
 Claude-AI-pipeline/
-├── pipeline/
-│   ├── claude_agent.py     # Anthropic SDK with prompt caching
-│   ├── jira_client.py      # Jira API wrapper
-│   ├── git_operations.py   # GitPython + GitHub PR creation
-│   └── validator.py        # pytest + syntax checker
-├── config/
-│   └── settings.py         # Environment variable loader
-├── prompts/
-│   └── coding_agent.txt    # System prompt for Claude
-├── tests/
-│   └── test_pipeline.py    # Unit tests (mocked external services)
-├── main.py                 # Orchestrator
-├── .env.example
-└── requirements.txt
+├── auto_fix.py       # สคริปต์หลัก
+├── .env              # Config (ไม่ commit ขึ้น Git)
+├── .env.example      # ตัวอย่าง Config
+└── README.md         # คู่มือนี้
 ```
 
-## How Prompt Caching Works
+---
 
-To minimise API cost, the pipeline uses [Anthropic prompt caching](https://docs.anthropic.com/en/docs/build-with-claude/prompt-caching):
+## ข้อควรระวัง
 
-- The **system prompt** is cached (5-minute TTL)
-- The **codebase context** (all files) is cached on the first iteration and reused across retry loops
-- Only the **task description** and **test errors** are sent uncached
+| เรื่อง | รายละเอียด |
+|--------|-----------|
+| **ไม่ Push โดยตรงไป `main`** | สคริปต์จะสร้าง Branch แยกเสมอ ต้องเปิด MR/PR เองหลังจากนั้น |
+| **Claude ใช้ `--dangerously-skip-permissions`** | หมายความว่า Claude จะแก้ไขไฟล์ได้โดยไม่ถามยืนยัน ตรวจสอบโค้ดก่อน Merge เสมอ |
+| **ไฟล์ `.env` มี Secret** | ห้าม Commit `.env` ขึ้น Git เด็ดขาด |
+| **REPO_LOCAL_PATH ต้องถูกต้อง** | ต้องเป็น absolute path ของ Repo จริงที่ต้องการแก้ ไม่ใช่โปรเจคนี้ |
 
-This reduces input token cost by ~90% on retry iterations.
+---
 
-## Running Tests
+## Troubleshooting
 
+**`claude: command not found`**
 ```bash
-pytest tests/ -v
+# ตรวจสอบว่า Claude Code ติดตั้งแล้วหรือยัง
+claude --version
+
+# ถ้ายังไม่ติดตั้ง ดาวน์โหลดจาก
+# https://claude.ai/code
 ```
+
+**`❌ เกิดข้อผิดพลาด: HTTP Error 401`**
+- ตรวจสอบ `JIRA_EMAIL` และ `JIRA_API_TOKEN` ใน `.env`
+- ตรวจสอบว่า Token ยังไม่หมดอายุ
+
+**`git push` ล้มเหลว**
+- ตรวจสอบว่ามีสิทธิ์ Push ไปยัง Remote Repo
+- ถ้าใช้ GitLab self-hosted ลอง set `GITLAB_SSL_VERIFY=false` ก่อน
+
+**Claude ไม่แก้โค้ดอะไรเลย**
+- ตรวจสอบว่า `REPO_LOCAL_PATH` ชี้ไปที่ Repo ที่ถูกต้อง
+- ลองรัน Claude แบบ manual เพื่อดู error: `claude -p "test" --cwd "path/to/repo"`

@@ -12,7 +12,11 @@
       "mcp__claude_ai_Atlassian_Rovo__getJiraIssue",
       "Bash(python main.py KAN2-205 --dry-run --skip-tests)",
       "Bash(tasklist)",
-      "Bash(kill 395)"
+      "Bash(kill 395)",
+      "Bash(where claude.cmd)"
+    ],
+    "additionalDirectories": [
+      "c:\\Users\\supholchai\\OneDrive - CTC Global (Thailand) Ltd\\Documents\\Git\\Claude-AI-pipeline\\config"
     ]
   }
 }
