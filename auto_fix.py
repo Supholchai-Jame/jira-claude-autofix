@@ -28,16 +28,16 @@ JIRA_EMAIL  = os.environ.get('JIRA_EMAIL', '')
 JIRA_TOKEN  = os.environ.get('JIRA_API_TOKEN', '')
 REPO_PATH   = os.environ.get('REPO_LOCAL_PATH', '.')
 
-TOTAL_STEPS = 6
+BAR_WIDTH = 25
 
 
 # ── Progress bar ──────────────────────────────────────────────────────────────
 
-def print_progress(step, label, done=False):
-    filled = int(20 * step / TOTAL_STEPS)
-    bar    = '█' * filled + '░' * (20 - filled)
+def print_progress(label, pct, done=False):
+    filled = int(BAR_WIDTH * pct / 100)
+    bar    = '█' * filled + '░' * (BAR_WIDTH - filled)
     status = '✅' if done else '⏳'
-    sys.stdout.write(f'\r{status} [{bar}] {step}/{TOTAL_STEPS}  {label:<40}')
+    sys.stdout.write(f'\r{status} [{bar}] {pct:3d}%  {label:<40}')
     sys.stdout.flush()
     if done:
         sys.stdout.write('\n')
@@ -48,19 +48,22 @@ class Spinner:
     """ใช้สำหรับ step ที่ใช้เวลานาน (Claude, git push)"""
     FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
 
-    def __init__(self, step, label):
-        self.step  = step
-        self.label = label
-        self._stop = threading.Event()
+    def __init__(self, label):
+        self.label   = label
+        self._stop   = threading.Event()
         self._thread = threading.Thread(target=self._spin, daemon=True)
 
     def _spin(self):
         i = 0
-        filled = int(20 * self.step / TOTAL_STEPS)
-        bar    = '█' * filled + '░' * (20 - filled)
+        start = time.time()
         while not self._stop.is_set():
-            frame = self.FRAMES[i % len(self.FRAMES)]
-            sys.stdout.write(f'\r{frame} [{bar}] {self.step}/{TOTAL_STEPS}  {self.label:<40}')
+            elapsed = time.time() - start
+            # asymptotic fill 0→95% (never reaches 100 until task finishes)
+            pct   = int(95 * (1 - 2 ** (-elapsed / 10)))
+            filled = int(BAR_WIDTH * pct / 100)
+            bar    = '█' * filled + '░' * (BAR_WIDTH - filled)
+            frame  = self.FRAMES[i % len(self.FRAMES)]
+            sys.stdout.write(f'\r{frame} [{bar}] {pct:3d}%  {self.label:<40}')
             sys.stdout.flush()
             time.sleep(0.08)
             i += 1
@@ -72,7 +75,7 @@ class Spinner:
     def __exit__(self, *_):
         self._stop.set()
         self._thread.join()
-        print_progress(self.step, self.label, done=True)
+        print_progress(self.label, 100, done=True)
 
 
 # ── Git helpers ───────────────────────────────────────────────────────────────
@@ -128,7 +131,7 @@ def run_workflow():
 
     try:
         # ── Step 1: ดึง Jira ──────────────────────────────────────────────────
-        with Spinner(1, 'ดึงข้อมูล Jira...'):
+        with Spinner('ดึงข้อมูล Jira...'):
             auth_string = f'{JIRA_EMAIL}:{JIRA_TOKEN}'
             auth_b64    = base64.b64encode(auth_string.encode('ascii')).decode('ascii')
 
@@ -148,7 +151,7 @@ def run_workflow():
 
         # ── Step 2: เตรียม Branch ─────────────────────────────────────────────
         branch_name = f'{commit_type}/{ticket_id}-{slugify(summary)}'
-        with Spinner(2, f'เตรียม Branch: {branch_name}'):
+        with Spinner(f'เตรียม Branch: {branch_name}'):
             note = checkout_or_create_branch(branch_name)
         print(f'   🌿 {note}')
 
@@ -156,7 +159,7 @@ def run_workflow():
         prompt = f'Please fix the codebase to resolve this Jira requirement: {description}. Make the necessary changes directly.'
         claude_bin = shutil.which('claude') or 'claude'
         claude_env = {k: v for k, v in os.environ.items() if k != 'ANTHROPIC_API_KEY'}
-        with Spinner(3, 'Claude กำลังวิเคราะห์และแก้โค้ด...'):
+        with Spinner('Claude กำลังวิเคราะห์และแก้โค้ด...'):
             result = subprocess.run(
                 [claude_bin, '--dangerously-skip-permissions', '-p', prompt],
                 cwd=REPO_PATH, capture_output=True, text=True, encoding='utf-8',
@@ -165,11 +168,11 @@ def run_workflow():
         if result.returncode != 0:
             raise RuntimeError(result.stderr or result.stdout or f'claude exited {result.returncode}')
 
-        print_progress(4, 'Claude แก้โค้ดเสร็จแล้ว', done=True)
+        print_progress('Claude แก้โค้ดเสร็จแล้ว', 100, done=True)
 
         # ── Step 5: Commit & Push ─────────────────────────────────────────────
         commit_msg = f'{ticket_id} {commit_type}({summary}): {desc_short}'
-        with Spinner(5, 'Commit และ Push...'):
+        with Spinner('Commit และ Push...'):
             git(['add', '.'])
             git(['commit', '-m', commit_msg])
             git(['push', 'origin', branch_name])
@@ -177,7 +180,7 @@ def run_workflow():
 
         # ── Step 6: Comment Jira ──────────────────────────────────────────────
         claude_output = result.stdout.strip() if result.stdout.strip() else 'แก้ไขโค้ดเรียบร้อยแล้ว'
-        with Spinner(6, 'ส่ง Comment กลับ Jira...'):
+        with Spinner('ส่ง Comment กลับ Jira...'):
             comment_url  = f'https://{JIRA_DOMAIN}/rest/api/2/issue/{ticket_id}/comment'
             comment_body = claude_output
             comment_data = json.dumps({'body': comment_body}).encode('utf-8')
